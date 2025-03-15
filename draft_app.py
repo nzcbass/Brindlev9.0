@@ -10,8 +10,9 @@ from doc_generator import DocGenerator
 from location_service import LocationService
 from d_projects_to_enriched import ProjectExtractor
 from direct_download import save_output_to_downloads
-from datetime import timedelta  # if needed elsewhere
+from datetime import timedelta
 from file_tracker import track_file, print_summary
+from logger import log_info, log_error, log_warning
 import tempfile
 import shutil
 import json
@@ -37,172 +38,168 @@ def allowed_file(filename):
 
 @app.route('/')
 def index():
+    log_info("Accessing index page")
     return render_template('index.html')
 
 @app.route('/upload', methods=['POST'])
 def upload_file_route():
-    if 'file' not in request.files:
-        return jsonify({"success": False, "message": "No file part in the request"})
-    
-    file = request.files['file']
-    
-    if file.filename == '':
-        return jsonify({"success": False, "message": "No selected file"})
-    
-    if file and allowed_file(file.filename):
+    try:
+        if 'file' not in request.files:
+            log_warning("No file part in the request")
+            return jsonify({"success": False, "message": "No file uploaded. Please select a file."})
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            log_warning("No selected file")
+            return jsonify({"success": False, "message": "No file selected. Please choose a file to upload."})
+        
+        if not allowed_file(file.filename):
+            log_warning(f"Invalid file type: {file.filename}")
+            return jsonify({
+                "success": False, 
+                "message": f"Invalid file type. Allowed types are: {', '.join(ALLOWED_EXTENSIONS)}"
+            })
+        
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
         
+        log_info(f"Saving uploaded file: {filename}")
+        file.save(file_path)
         track_file(file_path, "upload", "saved", "File uploaded by user")
 
-        # Process the file (assuming process_cv_pipeline is your processing function)
+        # Process the file
+        log_info(f"Processing file: {filename}")
         response = process_cv_pipeline(file_path, filename)
         
         return jsonify(response)
 
-    return jsonify({"success": False, "message": "Invalid file type"})
+    except Exception as e:
+        log_error("Error in file upload", e)
+        return jsonify({
+            "success": False,
+            "message": "An error occurred while processing your file. Please try again."
+        })
 
-def save_enriched_json(enriched_data, base_name):
-    enriched_json_path = os.path.join('parsed_jsons', f"{base_name}_enriched.json")
-    with open(enriched_json_path, 'w') as file:
-        json.dump(enriched_data, file, indent=4)
-    return enriched_json_path
-
-def process_cv_pipeline(file_path, filename):
-    """
-    Process the CV through the complete pipeline.
-    Returns a dictionary with the status and results.
-    """
-    # Track the start of pipeline processing 
-    base_name = os.path.splitext(os.path.basename(file_path))[0]
-    track_file(file_path, "pipeline", "starting", f"Processing CV: {base_name}")
-    
+def process_cv_pipeline(file_path: str, filename: str) -> dict:
+    """Process the CV through the complete pipeline with error handling."""
     try:
-        print(f"DEBUG: Starting CV pipeline with file: {file_path}")
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        log_info(f"Starting CV pipeline for: {filename}")
+        track_file(file_path, "pipeline", "starting", f"Processing CV: {base_name}")
         
         # Stage 1 - Upload to Firebase
-        print(f"DEBUG: Stage 1 - Uploading to Firebase")
+        log_info("Stage 1 - Uploading to Firebase")
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
         temp_file.close()
         
         shutil.copy2(file_path, temp_file.name)
         firebase_path = firebase_config.upload_file(temp_file.name, f"{base_name}.docx")
+        if not firebase_path:
+            raise Exception("Failed to upload file to Firebase")
         track_file(firebase_path, "firebase", "uploaded", "File uploaded to Firebase")
         
         # Stage 2 - Parse CV
-        print(f"DEBUG: Stage 2 - Parsing CV")
+        log_info("Stage 2 - Parsing CV")
         parsed_json_path = send_to_cv_parser(firebase_path)
+        if not parsed_json_path:
+            raise Exception("Failed to parse CV")
         if isinstance(parsed_json_path, dict):
             parsed_json_path = parsed_json_path.get('path', '')
         track_file(parsed_json_path, "parse", "parsed", "CV parsed to JSON")
         
         # Stage 3 - Generate blurb
-        print(f"DEBUG: Stage 3 - Generating blurb")
+        log_info("Stage 3 - Generating blurb")
         enriched_json_result = generate_blurb_with_claude(parsed_json_path)
         if isinstance(enriched_json_result, dict):
             enriched_json_path = enriched_json_result.get('path', '')
         else:
             enriched_json_path = enriched_json_result
         if not enriched_json_path:
-            raise FileNotFoundError("Enriched JSON path is empty")
+            raise Exception("Failed to generate blurb")
         track_file(enriched_json_path, "blurb", "generated", "Blurb generated and added to JSON")
         
         # Stage 4 - Classify locations
-        print(f"DEBUG: Stage 4 - Classifying locations")
+        log_info("Stage 4 - Classifying locations")
         location_service = LocationService()
         with open(enriched_json_path, 'r') as file:
             enriched_data = json.load(file)
         enriched_data = location_service.enrich_experience_locations(enriched_data)
         
-        track_file(enriched_json_path, "locations", "classified", "Locations classified in JSON")
-        
         # Stage 5 - Save enriched JSON
-        print(f"DEBUG: Stage 5 - Saving enriched JSON")
-        enriched_json_path = save_enriched_json(enriched_data, base_name)
+        log_info("Stage 5 - Saving enriched JSON")
+        enriched_json_path = os.path.join('parsed_jsons', f"{base_name}_enriched.json")
+        with open(enriched_json_path, 'w') as file:
+            json.dump(enriched_data, file, indent=4)
         track_file(enriched_json_path, "enrich", "saved", "Enriched JSON saved")
         
-        # Stage 5b - (Optional) Extract projects
-        projects_data = {}
-        extract_projects = False  # Change to True to enable project extraction
-        
-        if extract_projects:
-            print(f"DEBUG: Stage 5b - Extracting projects")
-            project_extractor = ProjectExtractor()
-            projects_data = project_extractor.extract_projects(enriched_data)
-        
         # Stage 6 - Generate document
-        print(f"DEBUG: Stage 6 - Generating document")
+        log_info("Stage 6 - Generating document")
         template_path = '/Users/claytonbadland/flask_project/templates/Current_template.docx'
         generator = DocGenerator(template_path)
-        output_path = generator.generate_cv_document(enriched_json_path, projects_data)
+        output_path = generator.generate_cv_document(enriched_json_path)
         if not output_path:
-            raise Exception("Failed to generate CV document using the template")
+            raise Exception("Failed to generate CV document")
         
         # Final step: Save document to Downloads folder
-        try:
-            if os.path.exists(output_path):
-                download_path = save_output_to_downloads(output_path)
-                track_file(download_path, "download", "saved", "File saved to Downloads folder")
-                download_url = f"/download/{os.path.basename(output_path)}"
-            else:
-                print(f"Generated file not found at {output_path}")
-                return {"success": False, "message": "Generated file not found"}
-                
-        except Exception as e:
-            print(f"Error saving to downloads: {str(e)}")
-            return {"success": False, "message": f"Error saving to downloads: {str(e)}"}
+        log_info("Saving document to Downloads folder")
+        if os.path.exists(output_path):
+            download_path = save_output_to_downloads(output_path)
+            if not download_path:
+                raise Exception("Failed to save file to Downloads folder")
+            track_file(download_path, "download", "saved", "File saved to Downloads folder")
+            download_url = f"/download/{os.path.basename(output_path)}"
+        else:
+            raise FileNotFoundError(f"Generated file not found at {output_path}")
 
+        log_info(f"CV processing completed successfully for: {filename}")
         return {
             'success': True,
-            'message': f'CV processed: {filename}',
+            'message': f'CV processed successfully: {filename}',
             'download_file': os.path.basename(output_path),
             'download_url': download_url
         }
         
     except Exception as e:
-        print(f"Error in CV pipeline: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return {"success": False, "message": f"Error processing CV: {str(e)}"}
+        log_error(f"Error processing CV: {filename}", e)
+        return {
+            "success": False,
+            "message": f"Error processing CV: {str(e)}"
+        }
 
 @app.route('/download/<filename>')
 def download_file(filename):
-    """Serve the file for download"""
-    return send_from_directory(os.path.join(app.root_path, 'outputs'),
-                              filename, as_attachment=True)
-
-@app.route('/download-processed/<path:filename>')
-def download_processed_cv(filename):
+    """Serve the file for download with error handling."""
     try:
-        # Extract base name without extension
-        base_name = Path(filename).stem
-        if base_name.endswith("_enriched"):
-            base_name = base_name[:-9]   # Remove _enriched suffix
-        
-        print(f"Processing download for base name: {base_name}")
-        
-        local_path = os.path.join(app.config['OUTPUT_FOLDER'], f"{base_name}_processed.docx")
-        if os.path.exists(local_path):
-            print(f"✅ Found document locally at: {local_path}")
-            
-            # Track the download
-            track_file(local_path, "download", "local", "Downloading local file")
-            
-            return send_file(
-                local_path,
-                as_attachment=True,
-                download_name=f"{base_name}_CV.docx",  # Clean filename for user
-                mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-        
-        return "Could not find the document", 404
-        
+        log_info(f"Initiating download for: {filename}")
+        return send_from_directory(
+            os.path.join(app.root_path, 'outputs'),
+            filename, 
+            as_attachment=True
+        )
     except Exception as e:
-        print(f"Error in download_processed_cv: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"Error processing request: {str(e)}", 500
+        log_error(f"Error downloading file: {filename}", e)
+        return jsonify({
+            "success": False,
+            "message": "Error downloading file. Please try again."
+        })
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    log_warning("File too large uploaded")
+    return jsonify({
+        "success": False,
+        "message": "File too large. Maximum size is 16MB."
+    }), 413
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    log_error("Internal server error", error)
+    return jsonify({
+        "success": False,
+        "message": "An internal server error occurred. Please try again later."
+    }), 500
 
 if __name__ == '__main__':
+    log_info("Starting CV Generator application")
     app.run(debug=True)
