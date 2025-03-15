@@ -160,10 +160,32 @@ def spell_check_context(context: Dict[str, Any], spell: SpellChecker) -> Dict[st
     return context
 
 def format_name(name_str: str) -> str:
-    """Format name strings with proper capitalization."""
+    """
+    Format name strings with proper capitalization.
+    Each word in the name will have its first letter capitalized.
+    
+    Args:
+        name_str (str): The name string to format
+        
+    Returns:
+        str: The formatted name with proper capitalization
+    """
     if not name_str:
         return ""
-    return ' '.join(word.capitalize() for word in name_str.split())
+        
+    # Split the string into words and capitalize each word
+    words = name_str.split()
+    formatted_words = []
+    
+    for word in words:
+        # Handle hyphenated words
+        if '-' in word:
+            formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+            formatted_words.append(formatted_word)
+        else:
+            formatted_words.append(word.capitalize())
+            
+    return ' '.join(formatted_words)
 
 def extract_city_from_address(address: str) -> str:
     """
@@ -442,7 +464,40 @@ class DocGenerator:
         
         # Basic Information for Personal Profile section
         context['name'] = format_name(f"{basics.get('first_name', '')} {basics.get('last_name', '')}")
-        context['position'] = basics.get('profession', '')
+        
+        # Format position with proper capitalization
+        raw_position = basics.get('profession', '')
+        words = raw_position.split()
+        formatted_words = []
+        
+        # Words that should remain lowercase (unless at start)
+        lowercase_words = {
+            'a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'in',
+            'of', 'on', 'or', 'the', 'to', 'with'
+        }
+        
+        # Format each word
+        for i, word in enumerate(words):
+            # First word is always capitalized
+            if i == 0:
+                if '-' in word:
+                    formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+                    formatted_words.append(formatted_word)
+                else:
+                    formatted_words.append(word.capitalize())
+            # Handle subsequent words
+            else:
+                # Check if word should be lowercase
+                if word.lower() in lowercase_words:
+                    formatted_words.append(word.lower())
+                # Handle hyphenated words
+                elif '-' in word:
+                    formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+                    formatted_words.append(formatted_word)
+                else:
+                    formatted_words.append(word.capitalize())
+        
+        context['position'] = ' '.join(formatted_words)
         
         # Get blurb directly from profile, not from basics
         blurb = profile.get('blurb', '')
