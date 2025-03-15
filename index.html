@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CV Processor</title>
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <style>
+    body {
+      font-family: 'Arial', sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      color: #333;
+    }
+    
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+      color: #2c3e50;
+    }
+    
+    #dropZone {
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      padding: 40px 20px;
+      text-align: center;
+      margin: 20px 0;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    
+    #dropZone:hover {
+      border-color: #2980b9;
+      background-color: #f7f9fa;
+    }
+    
+    #fileInput {
+      display: none;
+    }
+    
+    #fileNameDisplay {
+      margin: 15px 0;
+      font-size: 16px;
+      color: #555;
+    }
+    
+    #statusMessage {
+      margin: 15px 0;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    
+    .success {
+      background-color: #dff0d8;
+      color: #3c763d;
+    }
+    
+    .error {
+      background-color: #f2dede;
+      color: #a94442;
+    }
+    
+    .info {
+      background-color: #d9edf7;
+      color: #31708f;
+    }
+    
+    .loading {
+      display: none;
+      text-align: center;
+      margin: 20px 0;
+    }
+    
+    .loading:after {
+      content: " ";
+      display: inline-block;
+      width: 30px;
+      height: 30px;
+      border: 5px solid #2980b9;
+      border-radius: 50%;
+      border-top-color: transparent;
+      animation: spin 1s ease-in-out infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .download-section {
+      display: none;
+      text-align: center;
+      margin: 20px 0;
+      padding: 20px;
+      background-color: #f8f9fa;
+      border-radius: 8px;
+    }
+    
+    #downloadLink {
+      display: inline-block;
+      background-color: #2980b9;
+      color: white;
+      padding: 12px 24px;
+      text-decoration: none;
+      border-radius: 4px;
+      margin-top: 10px;
+      transition: background-color 0.3s;
+    }
+    
+    #downloadLink:hover {
+      background-color: #1c638b;
+    }
+    
+    .download-icon {
+      margin-right: 8px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Inserted image centered at the top with longest dimension 3cm -->
+  <div style="text-align: center; margin-bottom: 20px;">
+    <img src="/static/images/brindle_upload_image.jpg" alt="Brindle Upload" style="max-width: 3cm; max-height: 3cm;">
+  </div>
+  
+  <h1>CV Processor</h1>
+  
+  <p style="text-align: center;">Upload your CV to process and enhance it with our AI-powered system.</p>
+  
+  <div id="dropZone">
+    <div>Drop CV file here or click to browse</div>
+    <div style="margin-top:10px; font-size:13px; color:#777;">Supported formats: PDF, DOCX, DOC</div>
+    <!-- Hidden file input that gets triggered when drop zone is clicked -->
+    <input type="file" id="fileInput" name="file" accept=".pdf,.docx,.doc">
+  </div>
+  
+  <!-- Display the name of the selected file -->
+  <div id="fileNameDisplay"></div>
+  
+  <!-- Status message container -->
+  <div id="statusMessage"></div>
+  
+  <!-- Loading spinner -->
+  <div id="loadingIndicator" class="loading"></div>
+  
+  <!-- Enhanced download section -->
+  <div id="downloadSection" class="download-section">
+    <p>Your CV has been processed successfully! Click the button below to download:</p>
+    <a id="downloadLink" href="#" download>
+      <span class="download-icon">⬇️</span>
+      <span class="download-text">Download Processed CV</span>
+    </a>
+  </div>
+  
+  <script>
+    $(document).ready(function() {
+      // Handle drag and drop functionality
+      const dropZone = document.getElementById('dropZone');
+      const fileInput = document.getElementById('fileInput');
+      
+      // Click on drop zone to trigger file input
+      dropZone.addEventListener('click', () => {
+        fileInput.click();
+      });
+      
+      // Handle drag events
+      ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, preventDefaults, false);
+      });
+      
+      function preventDefaults(e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      
+      // Highlight drop zone when dragging over it
+      ['dragenter', 'dragover'].forEach(eventName => {
+        dropZone.addEventListener(eventName, highlight, false);
+      });
+      
+      ['dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, unhighlight, false);
+      });
+      
+      function highlight() {
+        dropZone.style.borderColor = '#2980b9';
+        dropZone.style.backgroundColor = '#f7f9fa';
+      }
+      
+      function unhighlight() {
+        dropZone.style.borderColor = '#ccc';
+        dropZone.style.backgroundColor = '';
+      }
+      
+      // Handle dropped files
+      dropZone.addEventListener('drop', handleDrop, false);
+      
+      function handleDrop(e) {
+        const dt = e.dataTransfer;
+        const files = dt.files;
+        handleFiles(files);
+      }
+      
+      // Handle file selection via the input field
+      fileInput.addEventListener('change', function() {
+        handleFiles(this.files);
+      });
+      
+      function handleFiles(files) {
+        if (files.length > 0) {
+          const file = files[0];
+          $('#fileNameDisplay').text('Selected file: ' + file.name);
+          uploadFile(file);
+        }
+      }
+      
+      function uploadFile(file) {
+        // Show loading indicator and info message
+        $('#loadingIndicator').show();
+        $('#statusMessage').removeClass('success error').addClass('info').text('Processing your CV. This may take a minute...');
+        $('#downloadSection').hide();
+        
+        // Create FormData object
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        // Send AJAX request
+        $.ajax({
+          url: '/upload',
+          type: 'POST',
+          data: formData,
+          processData: false,
+          contentType: false,
+          success: function(response) {
+            // Hide loading indicator
+            $('#loadingIndicator').hide();
+            
+            // Show success message
+            $('#statusMessage').removeClass('info error').addClass('success').text(response.message);
+            
+            // Check if download URL is available
+            if (response.download_url) {
+              // Update download link and show download section
+              $('#downloadLink').attr('href', response.download_url);
+              $('#downloadSection').show();
+            } else {
+              // If no download URL, show message
+              $('#statusMessage').append('<p>Your file has been processed and saved to your Downloads folder.</p>');
+            }
+          },
+          error: function(xhr, status, error) {
+            // Hide loading indicator
+            $('#loadingIndicator').hide();
+            
+            // Show error message
+            $('#statusMessage').removeClass('success info').addClass('error').text('Error: ' + (xhr.responseJSON?.message || 'Could not process the CV. Please try again.'));
+          }
+        });
+      }
+    });
+  </script>
+</body>
+</html>
