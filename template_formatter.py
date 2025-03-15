@@ -8,14 +8,28 @@ def format_company_and_position_placeholders(placeholder_mapping: dict) -> dict:
     Formats placeholders for consistent capitalization and formatting:
     - List items: Converts to bullet points with proper capitalization
     - Text fields: Ensures proper capitalization (first letter uppercase, rest lowercase)
+    
+    Args:
+        placeholder_mapping (dict): Dictionary containing placeholder mappings
+        
+    Returns:
+        dict: Formatted placeholder mappings
     """
+    # Country acronyms to preserve
+    country_acronyms = {'UAE', 'KSA', 'USA', 'UK'}
+    
+    # Words that should remain lowercase (unless at start)
+    lowercase_words = {
+        'a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'in',
+        'of', 'on', 'or', 'the', 'to', 'with'
+    }
+    
     # Format bullet-pointed lists
     keys_to_format = [
         "{InternationalEmployers}",
         "{NZEmployers}",
         "{NZPositions}",
         "{InternationalPositions}",
-        # Add Qualifications to the bullet-point formatting list
         "{Qualifications}"
     ]
     
@@ -30,12 +44,26 @@ def format_company_and_position_placeholders(placeholder_mapping: dict) -> dict:
         deduped = []
         seen = set()
         for item in items:
-            # Convert each item to title case
-            formatted_item = item.title()
+            # Format each word in the item
+            words = item.split()
+            formatted_words = []
+            for word in words:
+                # Check if word is a country acronym
+                if word.upper() in country_acronyms:
+                    formatted_words.append(word.upper())
+                # Handle hyphenated words
+                elif '-' in word:
+                    formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+                    formatted_words.append(formatted_word)
+                else:
+                    formatted_words.append(word.capitalize())
+            formatted_item = ' '.join(formatted_words)
+            
             # Remove duplicates (case-insensitive)
             if formatted_item.lower() not in seen:
                 deduped.append(formatted_item)
                 seen.add(formatted_item.lower())
+                
         # Join items as a bullet list
         bullet_list = "\n".join(["• " + item for item in deduped])
         placeholder_mapping[key] = bullet_list if bullet_list else "None"
@@ -43,17 +71,55 @@ def format_company_and_position_placeholders(placeholder_mapping: dict) -> dict:
     # Format simple text fields with proper capitalization
     keys_to_capitalize = [
         "{FullName}",
-        "{Position}",
         "{CurrentLocation}"
-        # Removed Qualifications from here since it's now in keys_to_format
     ]
     
     for key in keys_to_capitalize:
         value = placeholder_mapping.get(key, "")
         if not value or value.strip().lower() == "none":
             continue
-        # Title case for these fields (first letter of each word uppercase)
-        placeholder_mapping[key] = value.title()
+            
+        # Format each word in the value
+        words = value.split()
+        formatted_words = []
+        for word in words:
+            # Check if word is a country acronym
+            if word.upper() in country_acronyms:
+                formatted_words.append(word.upper())
+            # Handle hyphenated words
+            elif '-' in word:
+                formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+                formatted_words.append(formatted_word)
+            else:
+                formatted_words.append(word.capitalize())
+        placeholder_mapping[key] = ' '.join(formatted_words)
+    
+    # Special handling for position titles
+    if "{Position}" in placeholder_mapping:
+        value = placeholder_mapping["{Position}"]
+        if value and value.strip().lower() != "none":
+            words = value.split()
+            formatted_words = []
+            for i, word in enumerate(words):
+                # First word is always capitalized
+                if i == 0:
+                    if '-' in word:
+                        formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+                        formatted_words.append(formatted_word)
+                    else:
+                        formatted_words.append(word.capitalize())
+                # Handle subsequent words
+                else:
+                    # Check if word should be lowercase
+                    if word.lower() in lowercase_words:
+                        formatted_words.append(word.lower())
+                    # Handle hyphenated words
+                    elif '-' in word:
+                        formatted_word = '-'.join(part.capitalize() for part in word.split('-'))
+                        formatted_words.append(formatted_word)
+                    else:
+                        formatted_words.append(word.capitalize())
+            placeholder_mapping["{Position}"] = ' '.join(formatted_words)
         
     return placeholder_mapping
 
@@ -74,58 +140,6 @@ if __name__ == "__main__":
     for k, v in formatted_mapping.items():
         print(f"{k}:\n{v}\n")
         
-def format_company_and_position_placeholders(placeholder_mapping: dict) -> dict:
-    """
-    Formats placeholders for consistent capitalization and formatting:
-    - List items: Converts to bullet points with proper capitalization
-    - Text fields: Ensures proper capitalization (first letter uppercase, rest lowercase)
-    """
-    # Format bullet-pointed lists
-    keys_to_format = [
-        "{InternationalEmployers}",
-        "{NZEmployers}",
-        "{NZPositions}",
-        "{InternationalPositions}",
-        "{Qualifications}"  # Make sure this is included
-    ]
-    
-    for key in keys_to_format:
-        value = placeholder_mapping.get(key, "")
-        # Skip formatting if the value is empty or 'None'
-        if not value or value.strip().lower() == "none":
-            continue
-
-        # Split the string on semicolons
-        items = [item.strip() for item in value.split(";") if item.strip()]
-        deduped = []
-        seen = set()
-        for item in items:
-            # Convert each item to title case
-            formatted_item = item.title()
-            # Remove duplicates (case-insensitive)
-            if formatted_item.lower() not in seen:
-                deduped.append(formatted_item)
-                seen.add(formatted_item.lower())
-        # Join items as a bullet list
-        bullet_list = "\n".join(["• " + item for item in deduped])
-        placeholder_mapping[key] = bullet_list if bullet_list else "None"
-    
-    # Format simple text fields with proper capitalization
-    keys_to_capitalize = [
-        "{FullName}",
-        "{Position}",
-        "{CurrentLocation}"
-    ]
-    
-    for key in keys_to_capitalize:
-        value = placeholder_mapping.get(key, "")
-        if not value or value.strip().lower() == "none":
-            continue
-        # Title case for these fields (first letter of each word uppercase)
-        placeholder_mapping[key] = value.title()
-        
-    return placeholder_mapping
-
 def format_name(name_str):
     """
     Format a name string: First letter of each word capitalized, rest lowercase.
