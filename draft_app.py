@@ -4,7 +4,7 @@ from pathlib import Path
 from werkzeug.utils import secure_filename
 from firebase_utils import FirebaseConfig
 from validators import validate_json
-from cv_parser import send_to_cv_parser
+from cv_parser import CVParser, send_to_cv_parser
 from claude_utils import generate_blurb_with_claude
 from doc_generator import DocGenerator
 from location_service import LocationService
@@ -16,6 +16,8 @@ from logger import log_info, log_error, log_warning
 import tempfile
 import shutil
 import json
+import time
+from typing import Dict, Any, Tuple, Optional
 
 app = Flask(__name__)
 firebase_config = FirebaseConfig()
@@ -43,29 +45,37 @@ def index():
 
 @app.route('/upload', methods=['POST'])
 def upload_file_route():
+    temp_file = None
     try:
         if 'file' not in request.files:
             log_warning("No file part in the request")
             return jsonify({"success": False, "message": "No file uploaded. Please select a file."})
         
         file = request.files['file']
-        
         if file.filename == '':
             log_warning("No selected file")
-            return jsonify({"success": False, "message": "No file selected. Please choose a file to upload."})
+            return jsonify({"success": False, "message": "No selected file"})
         
         if not allowed_file(file.filename):
-            log_warning(f"Invalid file type: {file.filename}")
-            return jsonify({
-                "success": False, 
-                "message": f"Invalid file type. Allowed types are: {', '.join(ALLOWED_EXTENSIONS)}"
-            })
+            log_warning(f"File type not allowed: {file.filename}")
+            return jsonify({"success": False, "message": "File type not allowed. Please upload a PDF or DOCX file."})
+        
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        file.save(temp_file.name)
+        
+        # Check file size
+        file_size = os.path.getsize(temp_file.name)
+        if file_size > app.config['MAX_CONTENT_LENGTH']:
+            return jsonify({"success": False, "message": "File too large. Maximum size is 16MB."})
+        
+        log_info(f"Processing file: {file.filename} (Size: {file_size/1024/1024:.2f}MB)")
         
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
         log_info(f"Saving uploaded file: {filename}")
-        file.save(file_path)
+        shutil.copy2(temp_file.name, file_path)
         track_file(file_path, "upload", "saved", "File uploaded by user")
 
         # Process the file
@@ -75,81 +85,157 @@ def upload_file_route():
         return jsonify(response)
 
     except Exception as e:
-        log_error("Error in file upload", e)
-        return jsonify({
-            "success": False,
-            "message": "An error occurred while processing your file. Please try again."
-        })
+        log_error(f"Error processing file: {str(e)}")
+        return jsonify({"success": False, "message": "An error occurred while processing the file."})
+    
+    finally:
+        # Clean up temporary file
+        if temp_file and os.path.exists(temp_file.name):
+            try:
+                os.unlink(temp_file.name)
+            except Exception as e:
+                log_error(f"Error cleaning up temporary file: {str(e)}")
+
+def retry_firebase_upload(file_path: str, filename: str) -> Optional[str]:
+    """
+    Retry Firebase upload with specific timing requirements.
+    Returns firebase_path or None if all retries fail
+    """
+    max_retries = 3
+    base_wait = 5  # Base wait time in seconds
+    
+    for attempt in range(max_retries):
+        try:
+            log_info(f"Firebase upload attempt {attempt + 1} for {filename}")
+            firebase_path = firebase_config.upload_file(file_path, filename)
+            
+            if firebase_path:
+                log_info(f"Firebase upload successful on attempt {attempt + 1}, path: {firebase_path}")
+                return firebase_path
+                
+            # More detailed logging for failed attempts
+            log_warning(f"Firebase upload attempt {attempt + 1} failed - No path returned for file: {filename}")
+            
+        except Exception as e:
+            log_error(f"Firebase upload error on attempt {attempt + 1} for {filename}", e)
+        
+        # Don't wait after the last attempt
+        if attempt < max_retries - 1:
+            wait_time = base_wait + (attempt * 1) if attempt > 0 else base_wait
+            log_info(f"Waiting {wait_time} seconds before retry attempt {attempt + 2} for {filename}...")
+            time.sleep(wait_time)
+        else:
+            log_error(f"Firebase upload failed after all {max_retries} attempts for {filename}")
+    
+    return None
 
 def process_cv_pipeline(file_path: str, filename: str) -> dict:
     """Process the CV through the complete pipeline with error handling."""
     try:
         base_name = os.path.splitext(os.path.basename(file_path))[0]
-        log_info(f"Starting CV pipeline for: {filename}")
+        log_info(f"Starting CV pipeline for: {filename} (base name: {base_name})")
         track_file(file_path, "pipeline", "starting", f"Processing CV: {base_name}")
         
-        # Stage 1 - Upload to Firebase
-        log_info("Stage 1 - Uploading to Firebase")
+        # Stage 1 - Upload to Firebase with retries
+        log_info(f"Stage 1 - Uploading {filename} to Firebase")
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
         temp_file.close()
         
         shutil.copy2(file_path, temp_file.name)
-        firebase_path = firebase_config.upload_file(temp_file.name, f"{base_name}.docx")
+        firebase_path = retry_firebase_upload(temp_file.name, f"{base_name}.docx")
+        
         if not firebase_path:
-            raise Exception("Failed to upload file to Firebase")
+            log_error(f"Firebase upload failed completely for {filename}")
+            return {
+                "success": False,
+                "message": "Sorry, we're having some issues connecting to our cloud storage, please wait a couple of minutes and try again. If issues persist beyond this point, wait 15 minutes before trying again as Google is clearly having some issues :).",
+                "status": "error"
+            }
+            
         track_file(firebase_path, "firebase", "uploaded", "File uploaded to Firebase")
+        log_info(f"Firebase upload completed successfully for {filename}")
         
         # Stage 2 - Parse CV
-        log_info("Stage 2 - Parsing CV")
-        parsed_json_path = send_to_cv_parser(firebase_path)
+        log_info(f"Stage 2 - Parsing CV for {filename}")
+        cv_parser = CVParser()
+        parsed_result = cv_parser.send_to_cv_parser(firebase_path)
+        
+        # If parsing failed, it might be due to timeout
+        if not parsed_result:
+            log_warning(f"CV parsing failed for {filename} - Complex file structure detected")
+            return {
+                "success": False,
+                "message": "Complex file structure found, please save this resume as a PDF then upload again, this should solve the problem.",
+                "status": "warning",  # Indicates it's a warning, not a critical error
+                "retry_as_pdf": True
+            }
+            
+        # Get the path where the parsed data was saved
+        parsed_json_path = parsed_result.get('path')
         if not parsed_json_path:
-            raise Exception("Failed to parse CV")
-        if isinstance(parsed_json_path, dict):
-            parsed_json_path = parsed_json_path.get('path', '')
-        track_file(parsed_json_path, "parse", "parsed", "CV parsed to JSON")
+            log_error(f"No parsed JSON path returned for {filename}")
+            raise Exception("No path returned from CV parser")
+        
+        log_info(f"CV parsing completed successfully for {filename}")
         
         # Stage 3 - Generate blurb
-        log_info("Stage 3 - Generating blurb")
+        log_info(f"Stage 3 - Generating blurb for {filename}")
         enriched_json_result = generate_blurb_with_claude(parsed_json_path)
+
+        # Check if the blurb generation was successful
         if isinstance(enriched_json_result, dict):
             enriched_json_path = enriched_json_result.get('path', '')
+            if not enriched_json_path:
+                # Check for a specific error message
+                if enriched_json_result.get('status') == 'error':
+                    log_error(f"Failed to generate blurb for {filename}: {enriched_json_result.get('message')}")
+                    return enriched_json_result  # Return the error message directly
+                else:
+                    log_error(f"Failed to generate blurb for {filename}")
+                    raise Exception("Failed to generate blurb")
         else:
             enriched_json_path = enriched_json_result
-        if not enriched_json_path:
-            raise Exception("Failed to generate blurb")
+
         track_file(enriched_json_path, "blurb", "generated", "Blurb generated and added to JSON")
+        log_info(f"Blurb generation completed for {filename}")
         
         # Stage 4 - Classify locations
-        log_info("Stage 4 - Classifying locations")
+        log_info(f"Stage 4 - Classifying locations for {filename}")
         location_service = LocationService()
         with open(enriched_json_path, 'r') as file:
             enriched_data = json.load(file)
         enriched_data = location_service.enrich_experience_locations(enriched_data)
+        log_info(f"Location classification completed for {filename}")
         
         # Stage 5 - Save enriched JSON
-        log_info("Stage 5 - Saving enriched JSON")
+        log_info(f"Stage 5 - Saving enriched JSON for {filename}")
         enriched_json_path = os.path.join('parsed_jsons', f"{base_name}_enriched.json")
         with open(enriched_json_path, 'w') as file:
             json.dump(enriched_data, file, indent=4)
         track_file(enriched_json_path, "enrich", "saved", "Enriched JSON saved")
+        log_info(f"Enriched JSON saved successfully for {filename}")
         
         # Stage 6 - Generate document
-        log_info("Stage 6 - Generating document")
+        log_info(f"Stage 6 - Generating document for {filename}")
         template_path = '/Users/claytonbadland/flask_project/templates/Current_template.docx'
         generator = DocGenerator(template_path)
         output_path = generator.generate_cv_document(enriched_json_path)
         if not output_path:
+            log_error(f"Failed to generate CV document for {filename}")
             raise Exception("Failed to generate CV document")
         
         # Final step: Save document to Downloads folder
-        log_info("Saving document to Downloads folder")
+        log_info(f"Saving document to Downloads folder for {filename}")
         if os.path.exists(output_path):
             download_path = save_output_to_downloads(output_path)
             if not download_path:
+                log_error(f"Failed to save file to Downloads folder for {filename}")
                 raise Exception("Failed to save file to Downloads folder")
             track_file(download_path, "download", "saved", "File saved to Downloads folder")
             download_url = f"/download/{os.path.basename(output_path)}"
+            log_info(f"File saved successfully to Downloads folder for {filename}")
         else:
+            log_error(f"Generated file not found at {output_path} for {filename}")
             raise FileNotFoundError(f"Generated file not found at {output_path}")
 
         log_info(f"CV processing completed successfully for: {filename}")
@@ -164,19 +250,30 @@ def process_cv_pipeline(file_path: str, filename: str) -> dict:
         log_error(f"Error processing CV: {filename}", e)
         return {
             "success": False,
-            "message": f"Error processing CV: {str(e)}"
+            "message": f"Error processing CV: {str(e)}",
+            "status": "error"  # Indicates it's a critical error
         }
 
 @app.route('/download/<filename>')
 def download_file(filename):
     """Serve the file for download with error handling."""
     try:
-        log_info(f"Initiating download for: {filename}")
-        return send_from_directory(
+        log_info(f"Initiating download request for: {filename}")
+        file_path = os.path.join(app.root_path, 'outputs', filename)
+        
+        if not os.path.exists(file_path):
+            log_warning(f"Download failed - File not found: {filename}")
+            raise FileNotFoundError(f"File not found: {filename}")
+            
+        log_info(f"File found, initiating download: {filename}")
+        result = send_from_directory(
             os.path.join(app.root_path, 'outputs'),
             filename, 
             as_attachment=True
         )
+        log_info(f"Download completed successfully: {filename}")
+        return result
+        
     except Exception as e:
         log_error(f"Error downloading file: {filename}", e)
         return jsonify({
