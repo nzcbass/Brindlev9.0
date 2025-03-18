@@ -8,10 +8,11 @@ import base64
 import requests
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dotenv import load_dotenv
 from location_service import LocationService
 from file_tracker import track_file
+from logger import log_info, log_error, log_warning
 
 # Load environment variables
 load_dotenv('config.env')
@@ -19,6 +20,7 @@ load_dotenv('config.env')
 # Configuration constants
 PARSER_API_URL = os.environ.get("PARSER_API_URL", "https://cvparser.ai/api/v4/parse")
 PARSER_API_KEY = os.environ.get("PARSER_API_KEY", "")
+CVPARSER_TIMEOUT = int(os.getenv('CVPARSER_TIMEOUT_SECONDS', '30'))
 
 print(f"Debug - API URL: {PARSER_API_URL}")
 print(f"Debug - API Key loaded: {'Yes' if PARSER_API_KEY else 'No'} (Length: {len(PARSER_API_KEY)})")
@@ -57,7 +59,7 @@ def make_parser_api_call(url: str, headers: Dict[str, str], payload: Dict[str, A
                 url,
                 headers=headers,
                 json=payload,
-                timeout=60
+                timeout=CVPARSER_TIMEOUT
             )
             
             # If successful, return the parsed JSON
@@ -74,6 +76,11 @@ def make_parser_api_call(url: str, headers: Dict[str, str], payload: Dict[str, A
             
             # For other error codes, log and return None
             print(f"Parser API error: {response.status_code} - {response.text}")
+            return None
+            
+        except requests.Timeout:
+            # For timeouts, immediately return None - no retries
+            print(f"Parser API request timed out after {CVPARSER_TIMEOUT} seconds")
             return None
             
         except requests.exceptions.RequestException as e:
@@ -95,7 +102,15 @@ class CVParser:
         self.location_service = LocationService()
     
     def send_to_cv_parser(self, file_url: str) -> Optional[Dict[str, Any]]:
-        """Send CV to parser API and process the response."""
+        """
+        Send a CV to the parsing service with timeout handling.
+        
+        Args:
+            file_url: URL to the CV file in Firebase
+        
+        Returns:
+            Optional[Dict]: Parsed data or None if error occurs
+        """
         try:
             # Track the start of the parsing process
             track_file(file_url, "parse", "starting", "Beginning CV parsing process")
@@ -116,9 +131,6 @@ class CVParser:
                 'X-API-Key': PARSER_API_KEY
             }
 
-            # Add debug print of headers (with partial key for security)
-            print(f"Using headers: {{'Content-Type': 'application/json', 'X-API-Key': '{PARSER_API_KEY[:4]}...'}}")
-
             payload = {
                 'base64': base64_pdf,
                 'filename': 'cv.pdf',
@@ -128,43 +140,50 @@ class CVParser:
             print("Sending to parser API...")
             track_file(file_url, "parse", "requesting", "Sending PDF to parser API")
             
-            # Use the new retry mechanism for the API call
-            parsed_data = make_parser_api_call(PARSER_API_URL, headers, payload)
-            if not parsed_data:
-                track_file(file_url, "parse", "failed", "Parser API call failed after retries")
-                return None
+            try:
+                # Use the retry mechanism with configurable timeout
+                parsed_data = make_parser_api_call(PARSER_API_URL, headers, payload)
+                if not parsed_data:
+                    track_file(file_url, "parse", "failed", "Parser API call failed or timed out")
+                    return None
 
-            track_file(file_url, "parse", "received", "Received parsed data from API")
+                track_file(file_url, "parse", "received", "Received parsed data from API")
 
-            # Add location classification to each experience
-            for exp in parsed_data.get('data', {}).get('profile', {}).get('professional_experiences', []):
-                location = exp.get('location', '')
-                exp['is_nz'] = self.location_service.is_nz_location(location)
-                print(f"Location '{location}' classified as {'NZ' if exp['is_nz'] else 'International'}")
+                # Add location classification to each experience
+                for exp in parsed_data.get('data', {}).get('profile', {}).get('professional_experiences', []):
+                    location = exp.get('location', '')
+                    exp['is_nz'] = self.location_service.is_nz_location(location)
+                    print(f"Location '{location}' classified as {'NZ' if exp['is_nz'] else 'International'}")
+                    
+                    # If location is empty, try using company name
+                    if not location and 'company' in exp:
+                        company = exp.get('company', '')
+                        exp['is_nz'] = self.location_service.is_nz_location(company)
+                        print(f"Company '{company}' classified as {'NZ' if exp['is_nz'] else 'International'}")
+
+                # Save and track the parsed data
+                saved_result = self.save_parsed_data(parsed_data, file_url)
                 
-                # If location is empty, try using company name
-                if not location and 'company' in exp:
-                    company = exp.get('company', '')
-                    exp['is_nz'] = self.location_service.is_nz_location(company)
-                    print(f"Company '{company}' classified as {'NZ' if exp['is_nz'] else 'International'}")
+                # Extract file path for tracking
+                base_name = Path(file_url).stem
+                json_path = PATHS['PARSED_JSON'] / f"parsed_{base_name}.json"
+                track_file(str(json_path), "parse", "saved", "Parsed data saved to JSON")
 
-            # Save and track the parsed data
-            saved_result = self.save_parsed_data(parsed_data, file_url)
-            
-            # Extract file path for tracking
-            base_name = Path(file_url).stem
-            json_path = PATHS['PARSED_JSON'] / f"parsed_{base_name}.json"
-            track_file(str(json_path), "parse", "saved", "Parsed data saved to JSON")
+                return saved_result
 
-            return saved_result
-
+            except requests.Timeout:
+                msg = "Complex file structure found, please save this resume as a PDF then upload again, this should solve the problem."
+                track_file(file_url, "parse", "timeout", msg)
+                print(f"Parser API timed out after {CVPARSER_TIMEOUT} seconds")
+                return None
+                
         except Exception as e:
             print(f"Parser error: {e}")
             track_file(file_url, "parse", "error", f"Parser error: {str(e)}")
             import traceback
             traceback.print_exc()
             return None
-    
+
     def parse_cv(self, file_path: str) -> str:
         """
         Bridge method that works with the local file path passed from draft_app.py.
