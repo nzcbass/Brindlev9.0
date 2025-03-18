@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Union
 from datetime import timedelta
 import tempfile
+from retry_utils import retry_with_backoff
 
+@retry_with_backoff(max_retries=3, initial_delay=1, exceptions_to_check=(Exception,))
 def upload_file(file_path: Optional[str] = None, 
                 destination_blob_name: str = None, 
                 data: Optional[bytes] = None) -> Optional[str]:
