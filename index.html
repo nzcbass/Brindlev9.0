@@ -129,6 +129,7 @@
   <div id="dropZone">
     <div>Drop CV file here or click to browse</div>
     <div style="margin-top:10px; font-size:13px; color:#777;">Supported formats: PDF, DOCX, DOC</div>
+    <div style="margin-top:5px; font-size:13px; color:#777;">File Size Limit = 10MB</div>
     <!-- Hidden file input that gets triggered when drop zone is clicked -->
     <input type="file" id="fileInput" name="file" accept=".pdf,.docx,.doc">
   </div>
@@ -234,17 +235,35 @@
             // Hide loading indicator
             $('#loadingIndicator').hide();
             
-            // Show success message
-            $('#statusMessage').removeClass('info error').addClass('success').text(response.message);
+            if (!response.success) {
+                if (response.retry_as_pdf) {
+                    // Special case for complex file structure
+                    $('#statusMessage')
+                        .removeClass('success info')
+                        .addClass('warning')
+                        .html(response.message);
+                } else {
+                    // Regular error case
+                    $('#statusMessage')
+                        .removeClass('success info')
+                        .addClass('error')
+                        .text(response.message);
+                }
+                return;
+            }
+            
+            // Success case - show success message
+            $('#statusMessage')
+                .removeClass('error info warning')
+                .addClass('success')
+                .text(response.message);
             
             // Check if download URL is available
             if (response.download_url) {
-              // Update download link and show download section
-              $('#downloadLink').attr('href', response.download_url);
-              $('#downloadSection').show();
+                $('#downloadLink').attr('href', response.download_url);
+                $('#downloadSection').show();
             } else {
-              // If no download URL, show message
-              $('#statusMessage').append('<p>Your file has been processed and saved to your Downloads folder.</p>');
+                $('#statusMessage').append('<p>Your file has been processed and saved to your Downloads folder.</p>');
             }
           },
           error: function(xhr, status, error) {
