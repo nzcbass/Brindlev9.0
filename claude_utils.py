@@ -9,6 +9,7 @@ import re
 import time
 from firebase_utils import upload_file
 from template_formatter import format_name
+import requests
 
 # Environment and constants
 PROJECT_ROOT = Path(__file__).parent
@@ -125,7 +126,7 @@ def generate_blurb_with_claude(parsed_json_path: str) -> dict:
     """
     resume_data = {}
     try:
-        # Ensure parsed_json_path is not empty (new code inserted)
+        # Ensure parsed_json_path is not empty
         if not parsed_json_path:
             raise FileNotFoundError("Parsed JSON path is empty")
         
@@ -195,7 +196,29 @@ def generate_blurb_with_claude(parsed_json_path: str) -> dict:
             )
         
         # Make API call with retry logic
-        response = make_claude_api_call(prompt)
+        max_retries = 5
+        initial_delay = 1.0
+        delay = initial_delay
+        response = None
+
+        for attempt in range(max_retries):
+            try:
+                response = make_claude_api_call(prompt)
+                if response:
+                    break
+            except requests.exceptions.RequestException as e:
+                print(f"Request to Claude API failed: {str(e)}")
+                if attempt < max_retries - 1:
+                    print(f"Retrying in {delay:.2f} seconds...")
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    print("Failed to generate blurb after multiple attempts")
+                    return {
+                        "success": False,
+                        "message": "Our AI is having some problems, please wait a couple of minutes and then try uploading your CV again. If this problem persists, wait half an hour and hopefully Claude will have fixed itself by then :)",
+                        "status": "error"
+                    }
         
         # Process the response
         blurb = process_claude_response(response)
